@@ -1,0 +1,31 @@
+version: "3.8"
+services:
+  influx:
+    image: influxdb:1.8
+    container_name: influxdb-wombat
+    restart: always
+    volumes:
+      - "influx-db:/var/lib/influxdb"
+    networks:
+      - wombat-monitor-services
+
+  grafana:
+    image: grafana/grafana:7.4.3
+    container_name: grafana-wombat
+    restart: always
+    ports:
+      - 3001:3000
+    networks:
+      - wombat-monitor-services
+    volumes:
+      - "grafana-data:/var/lib/grafana"
+
+volumes:
+  grafana-data:
+    name: grafana-data
+  influx-db:
+    name: influx-db
+
+networks:
+  wombat-monitor-services:
+    name: wombat-monitor-services-network

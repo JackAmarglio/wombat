@@ -1,0 +1,32 @@
+version: "3.8"
+services:
+  wombatapp:
+    image: wombatgame/app:stable
+    container_name: wombat-game-stable
+    environment:
+      - MetricsOptions__ApplicationName=Wombat-stable
+      - InfluxDbOptions__BaseUri=http://influxdb-wombat:8086
+    restart: always
+    ports:
+      - 6969:5000
+    volumes:
+      - "lite-db:/app/litedb-database"
+      - "logs:/app/logs"
+    networks:
+      - share-network
+      - wombat-monitor-services
+
+volumes:
+  lite-db:
+  logs:
+
+networks:
+  share-network:
+    name: wombat-stable-network
+  wombat-monitor-services:
+    external: true
+    name: wombat-monitor-services-network
+
+
+
+

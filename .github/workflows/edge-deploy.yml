@@ -1,0 +1,194 @@
+name: edge build&deploy 
+
+on:
+  push:
+    branches: [edge]
+
+jobs:
+  build-and-test-backend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: Setup .NET Core
+        uses: actions/setup-dotnet@v1
+        with:
+          dotnet-version: 6.0.*
+
+      - name: Cache nuget
+        uses: actions/cache@v2
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('./src/backend/**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Install dependencies
+        run: dotnet restore
+        working-directory: ./src/backend
+        
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+        working-directory: ./src/backend
+
+      - name: Test
+        run: dotnet test --no-restore --verbosity normal
+        working-directory: ./src/backend
+
+  publish-backend-project:
+    needs: build-and-test-backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Setup .NET Core
+        uses: actions/setup-dotnet@v1
+        with:
+          dotnet-version: 6.0.*
+
+      - name: Cache nuget
+        uses: actions/cache@v2
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('./src/backend/**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Install dependencies
+        run: dotnet restore
+        working-directory: ./src/backend
+
+      - name: Publish backend
+        run: dotnet publish -c Release -v d -o ./publish /p:DebugType=None --self-contained=false --no-restore
+        working-directory: ./src/backend/Wombat.WebApi
+
+      - name: Upload backend artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: backend-published-$GITHUB_SHA
+          path: ./src/backend/Wombat.WebApi/publish/
+
+  publish-frontend-project:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-node@v2
+        with:
+          node-version: '13'
+      
+      - run: yarn install
+        working-directory: ./src/frontend
+        
+      - run: yarn build
+        working-directory: ./src/frontend
+        
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: frontend-published-$GITHUB_SHA
+          path: ./src/frontend/dist/
+
+  build-and-push-docker-image:
+    needs: [publish-backend-project, publish-frontend-project]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      
+      - name: Download backend artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: backend-published-$GITHUB_SHA
+          path: ./artifacts/app
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: frontend-published-$GITHUB_SHA
+          path: ./artifacts/app/dist
+
+      - name: Print the content of the publish directory
+        run: ls -l
+        working-directory: ./artifacts/app
+
+      - name: Print the content of the frontend directory
+        run: ls -l
+        working-directory: ./artifacts/app/dist
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v1
+        
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+        
+      - name: Login to DockerHub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          
+      - name: Copy WebApi Dockerfile to root
+        run: cp ./.deploy/Wombat.WebApi.Dockerfile ./Dockerfile
+        
+      - name: Build and push
+        id: docker_build
+        uses: docker/build-push-action@v2
+        with:
+          push: true
+          tags: wombatgame/app:edge
+          context: ./artifacts/
+          file: ./Dockerfile
+          
+      - name: Image digest
+        run: echo ${{ steps.docker_build.outputs.digest }}
+
+  copy-deploy-files-to-remote-server:
+    needs: build-and-push-docker-image
+    runs-on: ubuntu-latest
+  
+    steps:
+      - uses: actions/checkout@v2
+  
+      - name: copy deploy files
+        uses: appleboy/scp-action@v0.1.1
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          port: ${{ secrets.SSH_PORT }}
+          username: ${{ secrets.PROD_USERNAME }}
+          key: ${{ secrets.RSA_PRIVATE_KEY }}
+          passphrase: ${{ secrets.KEY_PASSPHRASE}}
+          source: ".deploy/docker-compose-edge.yml,.deploy/docker-compose-monitor-services.yml"
+          target: "/wombat-edge"
+          strip_components: 1
+
+  upgrade-app-on-remote-server:
+    needs: copy-deploy-files-to-remote-server
+    runs-on: ubuntu-latest
+      
+    steps:
+      - name: Get build version
+        run: |
+          BUILD_DATE=$(TZ='Europe/Kiev' date +'%T %d/%m/%y')
+          GITHUB_SHA_SHORT=$(echo $GITHUB_SHA | cut -c1-7)
+          APP_VERSION_STRING="$BUILD_DATE | $GITHUB_SHA_SHORT"
+
+          echo "APP_VERSION_STRING=$APP_VERSION_STRING" >> $GITHUB_ENV
+
+      - name: Print app version string
+        run: echo $APP_VERSION_STRING
+
+      - name: executing ssh command script on host
+        uses: appleboy/ssh-action@v0.1.4
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          port: ${{ secrets.SSH_PORT }}
+          username: ${{ secrets.PROD_USERNAME }}
+          key: ${{ secrets.RSA_PRIVATE_KEY }}
+          passphrase: ${{ secrets.KEY_PASSPHRASE}}
+          envs: APP_VERSION_STRING
+          script: |
+            cd /wombat-edge
+            echo "APP_VERSION=$APP_VERSION_STRING" > app.env
+            mv ./docker-compose-edge.yml ./docker-compose.yml
+            docker-compose -f ./docker-compose-monitor-services.yml -p wombat-monitor-services up -d
+            docker-compose pull 
+            docker-compose up -d
+  
